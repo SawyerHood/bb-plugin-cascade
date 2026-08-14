@@ -5,11 +5,9 @@ every live thread is a column in a horizontally scrolling strip, and rows group
 those columns by section, project, or machine. `hjkl` moves, `HL` reorders,
 `jk` flips rows.
 
-It is the "big" host-component example — the counterpart to
-[`thread-chat-demo`](../thread-chat-demo), which shows the same components in
-isolation. Cascade never touches timeline data, drafts, streaming, sending, or
-thread creation UI: it owns the strip and delegates everything inside a column
-to the host.
+It is the "big" host-component example. Cascade never touches timeline data,
+drafts, streaming, sending, or thread creation UI. It owns the strip and
+delegates everything inside a column to the host.
 
 ## What it demonstrates
 
@@ -77,13 +75,13 @@ flat index (`lib/rows.ts`) — never stored.
 
 ## Install
 
-```
-bb plugin install ./examples/plugins/cascade
+```sh
+bb plugin install git:https://github.com/SawyerHood/bb-plugin-cascade.git@^0.1.0
 ```
 
 Then open **Cascade** in the sidebar. After editing sources:
 
-```
+```sh
 bb plugin reload cascade
 ```
 
