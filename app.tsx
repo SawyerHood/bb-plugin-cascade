@@ -35,6 +35,7 @@ import {
   type CascadeRow,
   type GroupingMode,
 } from "./lib/rows";
+import { isRenameable, planRename } from "./lib/rename";
 import { cn } from "@/lib/utils";
 
 // niri's `preset-column-widths`, as a fraction of the viewport.
@@ -151,7 +152,10 @@ function CascadePanel({ subPath }: { subPath: string }) {
   const [overview, setOverview] = useState(false);
   const [draftOpen, setDraftOpen] = useState(false);
   const [draftParent, setDraftParent] = useState<string | null>(null);
-  const [renaming, setRenaming] = useState(false);
+  // The key of the row whose rail label is currently an input, or null. A key
+  // rather than a boolean: the rail draws the editor on the row it belongs to,
+  // and an index refetch can re-sort the rail while the user is typing in it.
+  const [renamingKey, setRenamingKey] = useState<string | null>(null);
   const [palette, setPalette] = useState<CascadeColumn | null>(null);
   const [paletteIdx, setPaletteIdx] = useState(0);
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -276,8 +280,15 @@ function CascadePanel({ subPath }: { subPath: string }) {
     const onFocusIn = (event: FocusEvent) => {
       if (composerIntentRef.current) return;
       if (!isTypingTarget(event.target)) return;
-      // The draft form's own textarea is ours and always intentional.
-      if ((event.target as HTMLElement).closest("[data-draft-form]")) return;
+      // The draft form's own textarea and the rail's rename box are ours, and
+      // both are always intentional: they only exist because the user asked for
+      // them, and bouncing the rename box would blur it the instant it opened.
+      if (
+        (event.target as HTMLElement).closest(
+          "[data-draft-form], [data-row-rename]",
+        )
+      )
+        return;
       takeFocus();
     };
     panel.addEventListener("focusin", onFocusIn);
@@ -622,22 +633,59 @@ function CascadePanel({ subPath }: { subPath: string }) {
     [draftParent, currentRow, rpc, refresh],
   );
 
-  const renameRow = useCallback(
-    async (name: string) => {
-      setRenaming(false);
-      if (!currentRow || currentRow.kind !== "sections") return;
-      const trimmed = name.trim();
-      if (!trimmed || trimmed === currentRow.name) return;
+  /**
+   * Open the rename editor on the focused row's rail label.
+   *
+   * One entry point for all three triggers — `c`, `F2`, and the toolbar name —
+   * so there is a single rename path and the guard cannot drift between them.
+   */
+  const startRename = useCallback(() => {
+    if (!currentRow) return;
+    if (!isRenameable(currentRow)) {
+      toast.error(`${MODE_LABEL[mode]} aren't renameable`);
+      return;
+    }
+    setRenamingKey(currentRow.key);
+  }, [currentRow, mode]);
+
+  const cancelRename = useCallback(() => {
+    setRenamingKey(null);
+    // The editor held the keyboard; hand the keymap back.
+    takeFocus();
+  }, [takeFocus]);
+
+  /**
+   * Save what the rail editor holds.
+   *
+   * Takes the row it was editing rather than reading the focused one: the editor
+   * is anchored to a row, and a refetch may have moved the focus. `restoreFocus`
+   * is true when ↵ ended the edit, because the caret then has nowhere to go and
+   * the keymap would be dead; a blur is the user putting the caret somewhere
+   * themselves, and taking it back off them would undo that click.
+   */
+  const commitRename = useCallback(
+    async (row: CascadeRow, value: string, restoreFocus: boolean) => {
+      setRenamingKey(null);
+      if (restoreFocus) takeFocus();
+      const plan = planRename(row, value);
+      if (plan.kind !== "rename") return;
       try {
-        await rpc.call("renameSection", { id: currentRow.key, name: trimmed });
+        await rpc.call("renameSection", { id: plan.id, name: plan.name });
         await refresh();
-        toast.success(`Renamed to “${trimmed}”`);
+        toast.success(`Renamed to “${plan.name}”`);
       } catch {
         toast.error("Rename failed");
       }
     },
-    [currentRow, rpc, refresh],
+    [rpc, refresh, takeFocus],
   );
+
+  // A row can leave the rail mid-rename (deleted elsewhere, or regrouped by
+  // `g`). Drop the editor with it, or the toolbar would stay frozen as text.
+  useEffect(() => {
+    if (renamingKey && !rows.some((row) => row.key === renamingKey))
+      setRenamingKey(null);
+  }, [renamingKey, rows]);
 
   /**
    * Create a section and land on it.
@@ -845,11 +893,7 @@ function CascadePanel({ subPath }: { subPath: string }) {
           return setPalette(focusedColumn);
         case "c":
         case "F2":
-          if (currentRow?.kind !== "sections") {
-            toast.error(`${MODE_LABEL[mode]} aren't renameable`);
-            return;
-          }
-          return setRenaming(true);
+          return startRename();
         case "q":
           return void closeColumn();
         case "i":
@@ -897,6 +941,7 @@ function CascadePanel({ subPath }: { subPath: string }) {
     focusRow,
     moveColumn,
     sendToRow,
+    startRename,
     cycleWidth,
     cycleMode,
     openDraft,
@@ -1113,32 +1158,20 @@ function CascadePanel({ subPath }: { subPath: string }) {
     >
       {/* toolbar */}
       <div className="flex h-10 flex-none items-center gap-2 border-b border-border/60 bg-sidebar px-2.5 text-sm">
-        {renaming ? (
-          <input
-            autoFocus
-            defaultValue={currentRow?.name ?? ""}
-            className="h-6 w-48 rounded border border-ring bg-background px-1.5 text-sm outline-none"
-            onBlur={(event) => void renameRow(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              event.stopPropagation();
-              if (event.key === "Enter")
-                void renameRow(event.currentTarget.value);
-              if (event.key === "Escape") setRenaming(false);
-            }}
-          />
+        {/* The editing happens on the rail row, so while a rename is open the
+            toolbar only reports the name. Two live inputs on one value would be
+            two places to type again. */}
+        {renamingKey ? (
+          <span className="px-1.5 py-0.5 font-medium">{currentRow?.name}</span>
         ) : (
           <button
             className="rounded px-1.5 py-0.5 font-medium hover:bg-accent"
             title={
-              currentRow?.kind === "sections"
-                ? "Rename section (c)"
+              isRenameable(currentRow)
+                ? "Rename section (c) — edits the row in the rail"
                 : "Only sections can be renamed"
             }
-            onClick={() =>
-              currentRow?.kind === "sections"
-                ? setRenaming(true)
-                : toast.error(`${MODE_LABEL[mode]} aren't renameable`)
-            }
+            onClick={startRename}
           >
             {currentRow?.name}
           </button>
@@ -1178,28 +1211,63 @@ function CascadePanel({ subPath }: { subPath: string }) {
           {rows.map((row, i) => {
             const isDropTarget =
               dragging?.overRow === i && dragging.fromRow !== i;
+            // Same classes in both states, so the row keeps its box: the rail
+            // does not shift when an editor opens, and the drag hit test still
+            // reads the pip it always read.
+            const rowClass = cn(
+              "flex items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors",
+              isDropTarget && acceptsDrop(row)
+                ? "border-success bg-success/15"
+                : isDropTarget
+                  ? "border-destructive bg-destructive/10"
+                  : i === safeRowIdx
+                    ? "border-primary/35 bg-primary/15"
+                    : "border-transparent hover:bg-accent",
+            );
+            // The index earns its place — 1-9 jumps to a row.
+            const indexLabel = (
+              <span className="w-3 flex-none font-mono text-[10px] text-muted-foreground/70">
+                {i + 1}
+              </span>
+            );
+
+            // An input is interactive content, so it cannot live inside the
+            // row's button. The row being renamed is a plain div for as long as
+            // it holds the editor, and keeps `data-row-pip` either way.
+            if (row.key === renamingKey)
+              return (
+                <div key={row.key} data-row-pip className={rowClass}>
+                  {indexLabel}
+                  <RowRenameInput
+                    name={row.name}
+                    onCommit={(value, restoreFocus) =>
+                      void commitRename(row, value, restoreFocus)
+                    }
+                    onCancel={cancelRename}
+                  />
+                </div>
+              );
+
             return (
               <button
                 key={row.key}
                 data-row-pip
                 onClick={() => setRowIdx(i)}
                 title={`${row.name} — ${row.columns.length} thread${row.columns.length === 1 ? "" : "s"}`}
-                className={cn(
-                  "flex items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors",
-                  isDropTarget && acceptsDrop(row)
-                    ? "border-success bg-success/15"
-                    : isDropTarget
-                      ? "border-destructive bg-destructive/10"
-                      : i === safeRowIdx
-                        ? "border-primary/35 bg-primary/15"
-                        : "border-transparent hover:bg-accent",
-                )}
+                className={rowClass}
               >
-                {/* The index earns its place — 1-9 jumps to a row. */}
-                <span className="w-3 flex-none font-mono text-[10px] text-muted-foreground/70">
-                  {i + 1}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                {indexLabel}
+                <span
+                  className="min-w-0 flex-1 truncate text-xs font-medium"
+                  onClick={(event) => {
+                    // Clicking the label of the row you are already on renames
+                    // it. Clicking any other row still only moves focus — the
+                    // click that brings you to a row is navigation, not an edit.
+                    if (i !== safeRowIdx || !isRenameable(row)) return;
+                    event.stopPropagation();
+                    startRename();
+                  }}
+                >
                   {row.name}
                 </span>
               </button>
@@ -1610,6 +1678,54 @@ function CascadePanel({ subPath }: { subPath: string }) {
         <Key>1-9</Key> row
       </footer>
     </div>
+  );
+}
+
+/**
+ * A rail row's label, while that row is being renamed.
+ *
+ * It takes the label's own box — same height, same flex slot — and draws its
+ * edge with a ring rather than a border, because a border would add two pixels
+ * and nudge the whole rail every time an editor opened.
+ *
+ * A component rather than an inline input for `settled`: ↵ commits and unmounts
+ * the box, and a blur arriving behind that must not send the same rename twice.
+ */
+function RowRenameInput({
+  name,
+  onCommit,
+  onCancel,
+}: {
+  name: string;
+  /** `restoreFocus` is true when a keystroke ended the edit, not a blur. */
+  onCommit: (value: string, restoreFocus: boolean) => void;
+  onCancel: () => void;
+}) {
+  const settled = useRef(false);
+  const settle = (run: () => void) => {
+    if (settled.current) return;
+    settled.current = true;
+    run();
+  };
+  return (
+    <input
+      autoFocus
+      data-row-rename
+      defaultValue={name}
+      // The panel keymap is bare letters, so nothing typed in here may reach
+      // it — not even the keys this box handles itself.
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        const value = event.currentTarget.value;
+        if (event.key === "Enter") settle(() => onCommit(value, true));
+        if (event.key === "Escape") settle(onCancel);
+      }}
+      onBlur={(event) => {
+        const value = event.currentTarget.value;
+        settle(() => onCommit(value, false));
+      }}
+      className="h-4 min-w-0 flex-1 rounded-sm bg-background px-1 text-xs font-medium leading-4 outline-none ring-1 ring-ring"
+    />
   );
 }
 

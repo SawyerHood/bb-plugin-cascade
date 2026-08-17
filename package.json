@@ -27,7 +27,8 @@
   ],
   "scripts": {
     "build": "bb plugin build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"lib/**/*.test.ts\""
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -36,6 +37,7 @@
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.4.4",
+    "@types/node": "^26.2.0",
     "@types/react": "^19.0.0",
     "bb-app": "0.37.0",
     "react": "^19.0.0",
