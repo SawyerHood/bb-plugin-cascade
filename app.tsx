@@ -23,9 +23,11 @@ import { toast } from "sonner";
 import type { rpcContract } from "./server";
 import {
   acceptsDrop,
+  availableModes,
   buildRows,
   clampFocus,
   isAdjacentChild,
+  isTaskMode,
   PINNED_KEY,
   reorderIds,
   type CascadeColumn,
@@ -58,6 +60,10 @@ const MODE_LABEL: Record<GroupingMode, string> = {
   sections: "sections",
   projects: "projects",
   hosts: "machines",
+  // "projects" is already taken by bb's own projects, so the Tasks plugin's
+  // projects need a name that cannot be read as either one.
+  taskProjects: "task projects",
+  tasks: "tasks",
 };
 
 interface Layout {
@@ -278,7 +284,13 @@ function CascadePanel({ subPath }: { subPath: string }) {
     return () => panel.removeEventListener("focusin", onFocusIn);
   }, [takeFocus, index, layout]);
 
-  const mode = layout?.mode ?? "sections";
+  const storedMode = layout?.mode ?? "sections";
+  // A stored task mode outlives the Tasks plugin being disabled or removed.
+  // Falling back keeps the panel from showing an empty strip with no way out.
+  const mode: GroupingMode =
+    index && !index.tasksAvailable && isTaskMode(storedMode)
+      ? "sections"
+      : storedMode;
   const rows = useMemo<CascadeRow[]>(
     () => (index ? buildRows(index, mode, layout?.order ?? {}) : []),
     [index, mode, layout],
@@ -529,12 +541,14 @@ function CascadePanel({ subPath }: { subPath: string }) {
   }, [focusedColumn, layout, persist]);
 
   const cycleMode = useCallback(() => {
-    const modes: GroupingMode[] = ["sections", "projects", "hosts"];
+    // The task modes leave the cycle when the Tasks plugin is unavailable,
+    // rather than being offered as a mode that can only show "No task".
+    const modes = availableModes(index?.tasksAvailable ?? false);
     const next = modes[(modes.indexOf(mode) + 1) % modes.length]!;
     setRowIdx(0);
     persist({ mode: next });
     toast.success(`Rows grouped by ${MODE_LABEL[next]}`);
-  }, [mode, persist]);
+  }, [mode, persist, index]);
 
   const openDraft = useCallback(
     (parent: string | null) => {
@@ -549,16 +563,16 @@ function CascadePanel({ subPath }: { subPath: string }) {
     [currentRow, setFocus],
   );
 
-  // Which project the composer opens on. The row itself decides when it can
-  // (a projects row IS a project); otherwise inherit from the neighbouring
-  // column, then fall back to the first known project.
+  // Which project the composer opens on. The row itself decides when it can — a
+  // projects row IS a project, and a task row inherits the bb project its Tasks
+  // project is linked to. Otherwise inherit from the neighbouring column, then
+  // fall back to the first known project.
   const draftProjectIdFor = useCallback(
     (row: CascadeRow): string | undefined =>
-      row.kind === "projects"
-        ? row.key
-        : (row.columns[currentFocus - 1]?.projectId ??
-          row.columns[0]?.projectId ??
-          index?.projects[0]?.id),
+      row.bbProjectId ??
+      row.columns[currentFocus - 1]?.projectId ??
+      row.columns[0]?.projectId ??
+      index?.projects[0]?.id,
     [currentFocus, index],
   );
 
@@ -1004,7 +1018,11 @@ function CascadePanel({ subPath }: { subPath: string }) {
   if (!rows.length) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        No threads yet.
+        {isTaskMode(mode)
+          ? // Threads exist; none of them is attached to a task. Say which, or
+            // the panel reads as broken.
+            "No threads are attached to a task yet. Press g to group by something else."
+          : "No threads yet."}
       </div>
     );
   }
@@ -1569,6 +1587,14 @@ function OverviewCard({
         <span className="min-w-0 flex-1 truncate text-[10px] uppercase tracking-wider text-muted-foreground">
           {projectName ?? "No project"}
         </span>
+        {/* The task key, when the thread has one. Short enough to sit beside the
+            project in every mode, so a card says what work it belongs to
+            without the user switching grouping to find out. */}
+        {column.taskKey !== null && (
+          <span className="flex-none font-mono text-[10px] text-muted-foreground">
+            {column.taskKey}
+          </span>
+        )}
         {column.pinned && (
           <span className="flex-none text-[10px] text-attention">★</span>
         )}
