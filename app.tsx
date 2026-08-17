@@ -664,6 +664,47 @@ function CascadePanel({ subPath }: { subPath: string }) {
     }
   }, [index, mode, rpc, refresh]);
 
+  /**
+   * Delete the section the strip is on.
+   *
+   * Empty sections hold their row now, so the rail needs a way to give one
+   * back — otherwise a mistyped `⇧S` is permanent. This cannot borrow the undo
+   * toast that archiving uses: there is no restore for a section, and
+   * recreating one by name would not pull its threads back into it.
+   *
+   * So an empty section goes straight away, having nothing to lose, and a
+   * populated one asks first and says what becomes of its threads. They are
+   * only unassigned — they land in Unsectioned, and none of them is deleted.
+   */
+  const removeSection = useCallback(async () => {
+    if (!currentRow) return;
+    if (currentRow.kind !== "sections") {
+      toast.error(
+        currentRow.kind === "pinned" || currentRow.kind === "unsectioned"
+          ? `“${currentRow.name}” isn't a section`
+          : `${MODE_LABEL[mode]} aren't deletable`,
+      );
+      return;
+    }
+    const { key, name, columns } = currentRow;
+    const run = async () => {
+      try {
+        await rpc.call("deleteSection", { id: key });
+        await refresh();
+        toast.success(`Deleted “${name}”`);
+      } catch {
+        toast.error("Could not delete section");
+      }
+    };
+    if (!columns.length) return void run();
+    toast(`Delete “${name}”?`, {
+      description: `Its ${columns.length} thread${
+        columns.length === 1 ? "" : "s"
+      } move to Unsectioned. This can't be undone.`,
+      action: { label: "Delete", onClick: () => void run() },
+    });
+  }, [currentRow, mode, rpc, refresh]);
+
   /** Archive the focused thread, with an undo toast — never a bare destroy. */
   const closeColumn = useCallback(async () => {
     if (!focusedColumn) return;
@@ -796,6 +837,8 @@ function CascadePanel({ subPath }: { subPath: string }) {
           return openDraft(focusedColumn?.threadId ?? null);
         case "S":
           return void newSection();
+        case "X":
+          return void removeSection();
         case "m":
           if (!focusedColumn) return;
           setPaletteIdx(0);
@@ -858,6 +901,7 @@ function CascadePanel({ subPath }: { subPath: string }) {
     cycleMode,
     openDraft,
     newSection,
+    removeSection,
     closeColumn,
     takeFocus,
     leaveComposer,
@@ -1113,6 +1157,12 @@ function CascadePanel({ subPath }: { subPath: string }) {
         </ToolbarButton>
         <ToolbarButton onClick={() => void newSection()}>
           + section
+        </ToolbarButton>
+        <ToolbarButton
+          onClick={() => void removeSection()}
+          disabled={currentRow?.kind !== "sections"}
+        >
+          − section
         </ToolbarButton>
         <ToolbarButton active={overview} onClick={() => setOverview((v) => !v)}>
           overview
@@ -1552,6 +1602,8 @@ function CascadePanel({ subPath }: { subPath: string }) {
         <Key>c</Key> rename
         <Sep />
         <Key>⇧S</Key> section
+        <Sep />
+        <Key>⇧X</Key> drop section
         <Sep />
         <Key>q</Key> archive
         <Sep />
