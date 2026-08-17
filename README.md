@@ -2,8 +2,8 @@
 
 A scrollable-tiling thread layout, [niri](https://github.com/YaLTeR/niri)-style:
 every live thread is a column in a horizontally scrolling strip, and rows group
-those columns by section, project, or machine. `hjkl` moves, `HL` reorders,
-`jk` flips rows.
+those columns by section, project, machine, task project, or task. `hjkl` moves,
+`HL` reorders, `jk` flips rows.
 
 It is the "big" host-component example. Cascade never touches timeline data,
 drafts, streaming, sending, or thread creation UI. It owns the strip and
@@ -67,11 +67,45 @@ any focus the user did not ask for straight back (`composerIntentRef` +
 a `focusin` listener), which is what makes a bare-letter keymap safe next to a
 dozen live composers.
 
-**A thin backend.** `server.ts` owns an index built from four parallel SDK reads
-(`bb.sdk.threadSections.list`, `projects.list`, `hosts.list`, `threads.list`),
-layout state in `bb.storage.kv`, and a `bb.background.service` that publishes a
-`bb.realtime` signal when the index changes. Rows are a pure projection of that
-flat index (`lib/rows.ts`) — never stored.
+**A thin backend.** `server.ts` owns an index built from five parallel reads
+(`bb.sdk.threadSections.list`, `projects.list`, `hosts.list`, `threads.list`, and
+the Tasks snapshot below), layout state in `bb.storage.kv`, and a
+`bb.background.service` that publishes a `bb.realtime` signal when the index
+changes. Rows are a pure projection of that flat index (`lib/rows.ts`) — never
+stored.
+
+**`bb.sdk.plugins.callRpc` — reading another plugin.** The `task projects` and
+`tasks` groupings come from the builtin Tasks plugin, read over cross-plugin rpc
+in `lib/tasks.ts`. Cascade never opens the Tasks plugin's SQLite file:
+
+```ts
+const { taskThreads } = await bb.sdk.plugins.callRpc({
+  pluginId: "tasks",
+  method: "listTaskThreads",
+  input: { taskId },
+  outputSchema: listTaskThreadsOutput, // loose, so Tasks may add fields
+});
+```
+
+Three things that shape reads across a plugin boundary:
+
+- **The mapping costs a call per task.** There is no bulk thread→task method, so
+  the fan-out is capped, concurrency-limited, and logs what it skipped rather
+  than truncating silently. Active tasks resolve first, so the cap bites on
+  finished work.
+- **A snapshot is cached for a few seconds.** The index refetches on every
+  debounced `thread:changed`, which a running thread emits continuously, while
+  task attachment barely moves. Without the cache the fan-out would run on each
+  of those refetches.
+- **The other plugin may be gone.** Absent, disabled, or failing rpc yields
+  `tasksAvailable: false` — the task modes then leave the `g` cycle rather than
+  offering a mode that can only show "No task", and a mode stored from before it
+  went away falls back to sections.
+
+Task rows are read-only drop targets. That is not a layout preference: the Tasks
+rpc contract exposes no attach method, so a drop would have nothing to call. The
+rows still earn their keep on the create side — a task project names the bb
+project its threads belong to, so the draft column's composer opens on it.
 
 ## Install
 
@@ -96,4 +130,4 @@ scrollable, so they always move rows.
 `h` `l` columns · `j` `k` rows · `H` `L` reorder · `J` `K` move to row ·
 `i` / `↵` composer · `esc` back · `r` width · `o` overview · `n` new thread ·
 `N` child thread · `m` move to… · `g` group by · `c` rename · `S` section ·
-`q` archive
+`X` drop section · `q` archive

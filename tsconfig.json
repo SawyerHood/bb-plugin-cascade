@@ -8,6 +8,11 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "esModuleInterop": true,
     "noEmit": true,
+    // The tests run straight on node (`npm test`), which resolves the real file
+    // it imports — so their import specifiers carry the .ts extension.
+    "allowImportingTsExtensions": true,
+    // node's own types, for the test files.
+    "types": ["node"],
     "skipLibCheck": true,
     "paths": {
       "@/*": ["./*"]

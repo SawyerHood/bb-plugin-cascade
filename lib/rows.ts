@@ -2,7 +2,35 @@
 // thread index through one grouping key. Kept pure so it is unit-testable
 // without a bb server.
 
-export type GroupingMode = "sections" | "projects" | "hosts";
+export type GroupingMode =
+  | "sections"
+  | "projects"
+  | "hosts"
+  | "taskProjects"
+  | "tasks";
+
+/** The order `g` cycles through. Task modes come last, and are skipped when
+ *  the Tasks plugin is unavailable (see `availableModes`). */
+export const GROUPING_MODES: readonly GroupingMode[] = [
+  "sections",
+  "projects",
+  "hosts",
+  "taskProjects",
+  "tasks",
+] as const;
+
+/** Grouping modes that need the Tasks plugin to produce any row at all. */
+const TASK_MODES: readonly GroupingMode[] = ["taskProjects", "tasks"] as const;
+
+export function isTaskMode(mode: GroupingMode): boolean {
+  return TASK_MODES.includes(mode);
+}
+
+/** The modes `g` may land on. Hiding rather than emptying the task modes keeps
+ *  the cycle from stepping through rows that can never exist. */
+export function availableModes(tasksAvailable: boolean): GroupingMode[] {
+  return GROUPING_MODES.filter((mode) => tasksAvailable || !isTaskMode(mode));
+}
 
 export interface CascadeColumn {
   threadId: string;
@@ -19,6 +47,18 @@ export interface CascadeColumn {
   unread: boolean;
   needsAttention: boolean;
   activeWorkCount: number;
+  /**
+   * The Tasks-plugin task this thread is attached to, or null.
+   *
+   * A thread may be attached to several tasks; the server resolves it to the
+   * earliest attachment so the column keeps ONE row. Rows have to be exclusive
+   * — the same live chat in two scrollable places is the problem the Pinned row
+   * already avoids.
+   */
+  taskId: string | null;
+  /** The task's human key ("CAS-1"), carried so a card needs no lookup map. */
+  taskKey: string | null;
+  taskProjectId: string | null;
   /** Immutable, so it can anchor a stable column position. */
   createdAt: number;
 }
@@ -28,10 +68,29 @@ export interface Named {
   name: string;
 }
 
+/** A Tasks-plugin project. `bbProjectId` is its linked bb project, when set. */
+export interface TaskProjectEntry extends Named {
+  bbProjectId: string | null;
+}
+
+/** A Tasks-plugin task. `name` is already "CAS-1 · title". */
+export interface TaskEntry extends Named {
+  taskProjectId: string;
+  bbProjectId: string | null;
+}
+
 export interface CascadeIndex {
   sections: Named[];
   projects: Named[];
   hosts: Named[];
+  taskProjects: TaskProjectEntry[];
+  tasks: TaskEntry[];
+  /**
+   * False when the Tasks plugin is absent, disabled, or unreachable. The task
+   * modes then carry no rows, so the frontend drops them from the `g` cycle
+   * rather than offering a mode that can only ever show "No task".
+   */
+  tasksAvailable: boolean;
   threads: CascadeColumn[];
 }
 
@@ -49,11 +108,46 @@ export interface CascadeRow {
   drop: RowDrop;
   /** True when this row's order is user-controlled. */
   reorderable: boolean;
+  /**
+   * The bb project a new thread in this row belongs to, when the row names one.
+   * A projects row IS a project; a task row inherits the bb project its Tasks
+   * project is linked to. Null everywhere else, and the draft column then
+   * inherits from a neighbouring column instead.
+   */
+  bbProjectId: string | null;
   columns: CascadeColumn[];
 }
 
 export const PINNED_KEY = "__pinned";
 export const UNSECTIONED_KEY = "__unsectioned";
+export const NO_TASK_KEY = "__notask";
+
+/**
+ * Row keys share one kv namespace for focus memory and manual order, and task
+ * ids and section ids are both ULIDs, so the task modes prefix theirs. Without
+ * it a section and a task could collide and silently share a remembered focus.
+ */
+const KEY_PREFIX: Partial<Record<GroupingMode, string>> = {
+  taskProjects: "taskproj:",
+  tasks: "task:",
+};
+
+function rowKeyFor(mode: GroupingMode, id: string): string {
+  return `${KEY_PREFIX[mode] ?? ""}${id}`;
+}
+
+/** The catch-all row's key: the task modes name a different thing from sections. */
+function looseKeyFor(mode: GroupingMode): string {
+  return isTaskMode(mode) ? NO_TASK_KEY : UNSECTIONED_KEY;
+}
+
+const LOOSE_NAME: Record<GroupingMode, string> = {
+  sections: "Unsectioned",
+  projects: "Unsectioned",
+  hosts: "No machine",
+  taskProjects: "No task",
+  tasks: "No task",
+};
 
 /**
  * Applies a manual order to a group.
@@ -89,6 +183,50 @@ function applyOrder(
   return [...ordered, ...remaining.values()];
 }
 
+/** The grouping keys of `mode`, in row order, with the bb project each implies. */
+function entriesFor(
+  index: CascadeIndex,
+  mode: GroupingMode,
+): { id: string; name: string; bbProjectId: string | null }[] {
+  switch (mode) {
+    case "sections":
+      return index.sections.map((s) => ({ ...s, bbProjectId: null }));
+    case "projects":
+      // A projects row IS a bb project, so it can seed the composer directly.
+      return index.projects.map((p) => ({ ...p, bbProjectId: p.id }));
+    case "hosts":
+      return index.hosts.map((h) => ({ ...h, bbProjectId: null }));
+    case "taskProjects":
+      return index.taskProjects.map((p) => ({
+        id: p.id,
+        name: p.name,
+        bbProjectId: p.bbProjectId,
+      }));
+    case "tasks":
+      return index.tasks.map((t) => ({
+        id: t.id,
+        name: t.name,
+        bbProjectId: t.bbProjectId,
+      }));
+  }
+}
+
+/** Which group a thread belongs to under `mode`. */
+function groupKeyOf(thread: CascadeColumn, mode: GroupingMode): string {
+  switch (mode) {
+    case "sections":
+      return thread.sectionId ?? UNSECTIONED_KEY;
+    case "projects":
+      return thread.projectId;
+    case "hosts":
+      return thread.hostId ?? UNSECTIONED_KEY;
+    case "taskProjects":
+      return thread.taskProjectId ?? NO_TASK_KEY;
+    case "tasks":
+      return thread.taskId ?? NO_TASK_KEY;
+  }
+}
+
 /**
  * Projects the flat index into rows.
  *
@@ -98,10 +236,16 @@ function applyOrder(
  * drag out of Pinned ambiguous. Here the row is exclusive, so dragging a thread
  * out of it unpins.
  *
- * Only sections and pinning are writable: a thread's project and host describe
- * where it actually lives, so those rows render read-only.
+ * Only sections and pinning are writable: a thread's project, host, and task
+ * describe where it actually lives, so those rows render read-only. (The Tasks
+ * plugin exposes no attach method over its rpc contract, so a task row could
+ * not accept a drop even if the layout wanted it to.)
  *
- * Empty groups are dropped — a section with no threads has no strip to draw.
+ * An empty section still gets a row. It is the only writable grouping, so its
+ * row is the drop target that a freshly created section needs before anything
+ * lives in it — drop the row and there is nowhere to drag, `m`, or `⇧jk` a
+ * thread to. Every other grouping stays dropped when empty: those rows are
+ * read-only, so an empty one is a rail slot you can never fill.
  */
 export function buildRows(
   index: CascadeIndex,
@@ -118,6 +262,7 @@ export function buildRows(
       kind: "pinned",
       drop: { kind: "pin" },
       reorderable: true,
+      bbProjectId: null,
       // Pinned order is server-side (`pinSortKey`), shared with the sidebar.
       columns: [...pinned].sort((a, b) =>
         (a.pinSortKey ?? "").localeCompare(b.pinSortKey ?? ""),
@@ -126,32 +271,21 @@ export function buildRows(
   }
 
   const rest = index.threads.filter((thread) => !thread.pinned);
-  const keyOf = (thread: CascadeColumn): string => {
-    if (mode === "sections") return thread.sectionId ?? UNSECTIONED_KEY;
-    if (mode === "projects") return thread.projectId;
-    return thread.hostId ?? UNSECTIONED_KEY;
-  };
 
   const byKey = new Map<string, CascadeColumn[]>();
   for (const thread of rest) {
-    const key = keyOf(thread);
+    const key = groupKeyOf(thread, mode);
     const existing = byKey.get(key);
     if (existing) existing.push(thread);
     else byKey.set(key, [thread]);
   }
 
-  const ordered: Named[] =
-    mode === "sections"
-      ? index.sections
-      : mode === "projects"
-        ? index.projects
-        : index.hosts;
-
-  for (const entry of ordered) {
-    const columns = byKey.get(entry.id);
-    if (!columns?.length) continue;
+  for (const entry of entriesFor(index, mode)) {
+    const columns = byKey.get(entry.id) ?? [];
+    if (!columns.length && mode !== "sections") continue;
+    const key = rowKeyFor(mode, entry.id);
     rows.push({
-      key: entry.id,
+      key,
       name: entry.name,
       kind: mode,
       drop:
@@ -159,20 +293,25 @@ export function buildRows(
           ? { kind: "section", sectionId: entry.id }
           : { kind: "none" },
       reorderable: true,
-      columns: applyOrder(columns, order[entry.id]),
+      bbProjectId: entry.bbProjectId,
+      columns: applyOrder(columns, order[key]),
     });
   }
 
-  const loose = byKey.get(UNSECTIONED_KEY);
+  const looseKey = looseKeyFor(mode);
+  const loose = byKey.get(looseKey);
   if (loose?.length) {
     rows.push({
-      key: UNSECTIONED_KEY,
-      name: mode === "hosts" ? "No machine" : "Unsectioned",
+      key: looseKey,
+      name: LOOSE_NAME[mode],
       kind: "unsectioned",
       drop:
-        mode === "sections" ? { kind: "section", sectionId: null } : { kind: "none" },
+        mode === "sections"
+          ? { kind: "section", sectionId: null }
+          : { kind: "none" },
       reorderable: true,
-      columns: applyOrder(loose, order[UNSECTIONED_KEY]),
+      bbProjectId: null,
+      columns: applyOrder(loose, order[looseKey]),
     });
   }
 

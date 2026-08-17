@@ -10,6 +10,8 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { NewThreadRequest } from "@get-bb/plugin-sdk/app";
 import { z } from "zod";
+import { createTasksReader } from "./lib/tasks";
+import { GROUPING_MODES } from "./lib/rows";
 
 const LAYOUT_KEY = "layout";
 
@@ -51,6 +53,17 @@ const newThreadRequestSchema = z.custom<NewThreadRequest>(isNewThreadRequest, {
 
 const namedSchema = z.object({ id: z.string(), name: z.string() });
 
+// Tasks-plugin projects and tasks carry the bb project a new thread in their row
+// should default to — the link the Tasks plugin already stores.
+const taskProjectSchema = namedSchema.extend({
+  bbProjectId: z.string().nullable(),
+});
+
+const taskSchema = namedSchema.extend({
+  taskProjectId: z.string(),
+  bbProjectId: z.string().nullable(),
+});
+
 const columnSchema = z.object({
   threadId: z.string(),
   title: z.string(),
@@ -67,6 +80,11 @@ const columnSchema = z.object({
   unread: z.boolean(),
   needsAttention: z.boolean(),
   activeWorkCount: z.number().int().nonnegative(),
+  // The Tasks-plugin task this thread is attached to, resolved to exactly one
+  // so the column lands in exactly one row (see lib/tasks.ts).
+  taskId: z.string().nullable(),
+  taskKey: z.string().nullable(),
+  taskProjectId: z.string().nullable(),
   // Deliberately createdAt, not updatedAt: column position is anchored to it,
   // and updatedAt changes on every turn (see applyOrder in lib/rows.ts).
   createdAt: z.number(),
@@ -76,11 +94,14 @@ const indexSchema = z.object({
   sections: z.array(namedSchema),
   projects: z.array(namedSchema),
   hosts: z.array(namedSchema),
+  taskProjects: z.array(taskProjectSchema),
+  tasks: z.array(taskSchema),
+  tasksAvailable: z.boolean(),
   threads: z.array(columnSchema),
 });
 
 const layoutSchema = z.object({
-  mode: z.enum(["sections", "projects", "hosts"]),
+  mode: z.enum(GROUPING_MODES),
   // Column width preset index per thread id (0 = 1/3, 1 = 1/2, 2 = 2/3).
   widths: z.record(z.string(), z.number().int().min(0).max(2)),
   // Focused column index per row key, so switching grouping keeps your place.
@@ -161,6 +182,10 @@ export const rpcContract = defineRpcContract({
 });
 
 export default async function plugin(bb: BbPluginApi) {
+  // Reads the Tasks plugin over cross-plugin rpc, with its own short-lived
+  // cache. Created once per load so the cache survives across index calls.
+  const readTasks = createTasksReader(bb);
+
   async function readLayout(): Promise<Layout> {
     const stored = await bb.storage.kv.get<unknown>(LAYOUT_KEY);
     const parsed = layoutSchema.safeParse(stored);
@@ -168,11 +193,13 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(rpcContract, {
-    // The whole index in four parallel reads. Every grouping key, the status
+    // The whole index in five parallel reads. Every grouping key, the status
     // dot, the branch tag, and the unread mark come from `ThreadListEntry`
-    // itself — the strip never fans out per thread.
+    // itself — the strip never fans out per thread. The task grouping keys are
+    // the one exception: they come from another plugin, so they are read behind
+    // a cache of their own (lib/tasks.ts) rather than on every refetch.
     async index() {
-      const [sections, projects, hosts, threads] = await Promise.all([
+      const [sections, projects, hosts, threads, tasks] = await Promise.all([
         bb.sdk.threadSections.list(),
         bb.sdk.projects.list({ includePersonal: true }),
         bb.sdk.hosts.list().catch(() => []),
@@ -182,12 +209,16 @@ export default async function plugin(bb: BbPluginApi) {
           archived: false,
           limit: THREAD_LIMIT,
         }),
+        readTasks(),
       ]);
 
       return {
         sections: sections.map((s) => ({ id: s.id, name: s.name })),
         projects: projects.map((p) => ({ id: p.id, name: p.name })),
         hosts: hosts.map((h) => ({ id: h.id, name: h.name })),
+        taskProjects: tasks.projects,
+        tasks: tasks.tasks,
+        tasksAvailable: tasks.available,
         threads: threads.map((thread) => ({
           threadId: thread.id,
           title: thread.title ?? thread.titleFallback ?? "Untitled",
@@ -208,6 +239,9 @@ export default async function plugin(bb: BbPluginApi) {
             thread.activity.activeWorkflowCount +
             thread.activity.activeBackgroundAgentCount +
             thread.activity.activeBackgroundCommandCount,
+          taskId: tasks.byThread.get(thread.id)?.taskId ?? null,
+          taskKey: tasks.byThread.get(thread.id)?.taskKey ?? null,
+          taskProjectId: tasks.byThread.get(thread.id)?.taskProjectId ?? null,
           createdAt: thread.createdAt,
         })),
       };
@@ -266,8 +300,21 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     async createSection({ name }) {
-      const section = await bb.sdk.threadSections.create({ name });
-      return { id: section.id, name: section.name };
+      try {
+        const section = await bb.sdk.threadSections.create({ name });
+        return { id: section.id, name: section.name };
+      } catch (error) {
+        // Section names are unique server-side, so a second client — or a
+        // strip working from a stale index — gets HTTP 409 here. The caller
+        // wanted a section by that name and one exists, so hand back the
+        // existing row rather than failing: it focuses that instead. Any
+        // other failure has no section to point at, so it still throws.
+        const existing = (await bb.sdk.threadSections.list()).find(
+          (section) => section.name === name,
+        );
+        if (!existing) throw error;
+        return { id: existing.id, name: existing.name };
+      }
     },
 
     async renameSection({ id, name }) {
