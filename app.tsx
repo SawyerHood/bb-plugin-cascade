@@ -893,6 +893,10 @@ function CascadePanel({ subPath }: { subPath: string }) {
           return setPalette(focusedColumn);
         case "c":
         case "F2":
+          // The editor autofocuses inside this very keystroke, so without this
+          // the browser's default action types the "c" into the box it just
+          // opened and every rename starts as "<name>c".
+          event.preventDefault();
           return startRename();
         case "q":
           return void closeColumn();
