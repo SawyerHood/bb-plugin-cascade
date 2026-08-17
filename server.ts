@@ -266,8 +266,21 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     async createSection({ name }) {
-      const section = await bb.sdk.threadSections.create({ name });
-      return { id: section.id, name: section.name };
+      try {
+        const section = await bb.sdk.threadSections.create({ name });
+        return { id: section.id, name: section.name };
+      } catch (error) {
+        // Section names are unique server-side, so a second client — or a
+        // strip working from a stale index — gets HTTP 409 here. The caller
+        // wanted a section by that name and one exists, so hand back the
+        // existing row rather than failing: it focuses that instead. Any
+        // other failure has no section to point at, so it still throws.
+        const existing = (await bb.sdk.threadSections.list()).find(
+          (section) => section.name === name,
+        );
+        if (!existing) throw error;
+        return { id: existing.id, name: existing.name };
+      }
     },
 
     async renameSection({ id, name }) {

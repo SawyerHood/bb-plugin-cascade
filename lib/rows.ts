@@ -101,7 +101,11 @@ function applyOrder(
  * Only sections and pinning are writable: a thread's project and host describe
  * where it actually lives, so those rows render read-only.
  *
- * Empty groups are dropped — a section with no threads has no strip to draw.
+ * An empty section still gets a row. It is the only writable grouping, so its
+ * row is the drop target that a freshly created section needs before anything
+ * lives in it — drop the row and there is nowhere to drag, `m`, or `⇧jk` a
+ * thread to. Empty projects and hosts stay dropped: those rows are read-only,
+ * so an empty one is a rail slot you can never fill.
  */
 export function buildRows(
   index: CascadeIndex,
@@ -148,8 +152,8 @@ export function buildRows(
         : index.hosts;
 
   for (const entry of ordered) {
-    const columns = byKey.get(entry.id);
-    if (!columns?.length) continue;
+    const columns = byKey.get(entry.id) ?? [];
+    if (!columns.length && mode !== "sections") continue;
     rows.push({
       key: entry.id,
       name: entry.name,

@@ -334,6 +334,18 @@ function CascadePanel({ subPath }: { subPath: string }) {
     if (column >= 0) setFocus(rows[target]!, column);
   }, [rows, subPath, setFocus]);
 
+  // A row a mutation asked to land on. It cannot be an index, because the row
+  // does not exist yet when the request is made — it arrives with the next
+  // index refetch, at whatever position the section order puts it.
+  const pendingRowKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pendingRowKey.current) return;
+    const target = rows.findIndex((row) => row.key === pendingRowKey.current);
+    if (target < 0) return;
+    pendingRowKey.current = null;
+    setRowIdx(target);
+  }, [rows]);
+
   // ------------------------------------------------------------ mutations
   /** Apply a row's drop rule to a thread. Returns false when it is read-only. */
   const applyDrop = useCallback(
@@ -613,15 +625,71 @@ function CascadePanel({ subPath }: { subPath: string }) {
     [currentRow, rpc, refresh],
   );
 
+  /**
+   * Create a section and land on it.
+   *
+   * The default name has to dodge the names already taken: section names are
+   * unique server-side, so a fixed "New section" fails with HTTP 409 the
+   * second time you press this. The server still recovers from a lost race by
+   * returning the existing section, so either way this resolves to a real row.
+   */
   const newSection = useCallback(async () => {
+    const taken = new Set((index?.sections ?? []).map((section) => section.name));
+    let name = "New section";
+    for (let n = 2; taken.has(name); n += 1) name = `New section ${n}`;
     try {
-      await rpc.call("createSection", { name: "New section" });
+      const section = await rpc.call("createSection", { name });
+      // The row only exists once the index refetch lands, so ask for it by key
+      // and let the effect above jump once it appears. Only a sections grouping
+      // draws section rows, so in any other one there is nothing to land on.
+      if (mode === "sections") pendingRowKey.current = section.id;
       await refresh();
-      toast.success("Section created — move a thread into it to see its row");
+      toast.success(`Created “${section.name}” — press c to rename it`);
     } catch {
       toast.error("Could not create section");
     }
-  }, [rpc, refresh]);
+  }, [index, mode, rpc, refresh]);
+
+  /**
+   * Delete the section the strip is on.
+   *
+   * Empty sections hold their row now, so the rail needs a way to give one
+   * back — otherwise a mistyped `⇧S` is permanent. This cannot borrow the undo
+   * toast that archiving uses: there is no restore for a section, and
+   * recreating one by name would not pull its threads back into it.
+   *
+   * So an empty section goes straight away, having nothing to lose, and a
+   * populated one asks first and says what becomes of its threads. They are
+   * only unassigned — they land in Unsectioned, and none of them is deleted.
+   */
+  const removeSection = useCallback(async () => {
+    if (!currentRow) return;
+    if (currentRow.kind !== "sections") {
+      toast.error(
+        currentRow.kind === "pinned" || currentRow.kind === "unsectioned"
+          ? `“${currentRow.name}” isn't a section`
+          : `${MODE_LABEL[mode]} aren't deletable`,
+      );
+      return;
+    }
+    const { key, name, columns } = currentRow;
+    const run = async () => {
+      try {
+        await rpc.call("deleteSection", { id: key });
+        await refresh();
+        toast.success(`Deleted “${name}”`);
+      } catch {
+        toast.error("Could not delete section");
+      }
+    };
+    if (!columns.length) return void run();
+    toast(`Delete “${name}”?`, {
+      description: `Its ${columns.length} thread${
+        columns.length === 1 ? "" : "s"
+      } move to Unsectioned. This can't be undone.`,
+      action: { label: "Delete", onClick: () => void run() },
+    });
+  }, [currentRow, mode, rpc, refresh]);
 
   /** Archive the focused thread, with an undo toast — never a bare destroy. */
   const closeColumn = useCallback(async () => {
@@ -755,6 +823,8 @@ function CascadePanel({ subPath }: { subPath: string }) {
           return openDraft(focusedColumn?.threadId ?? null);
         case "S":
           return void newSection();
+        case "X":
+          return void removeSection();
         case "m":
           if (!focusedColumn) return;
           setPaletteIdx(0);
@@ -817,6 +887,7 @@ function CascadePanel({ subPath }: { subPath: string }) {
     cycleMode,
     openDraft,
     newSection,
+    removeSection,
     closeColumn,
     takeFocus,
     leaveComposer,
@@ -1068,6 +1139,12 @@ function CascadePanel({ subPath }: { subPath: string }) {
         </ToolbarButton>
         <ToolbarButton onClick={() => void newSection()}>
           + section
+        </ToolbarButton>
+        <ToolbarButton
+          onClick={() => void removeSection()}
+          disabled={currentRow?.kind !== "sections"}
+        >
+          − section
         </ToolbarButton>
         <ToolbarButton active={overview} onClick={() => setOverview((v) => !v)}>
           overview
@@ -1507,6 +1584,8 @@ function CascadePanel({ subPath }: { subPath: string }) {
         <Key>c</Key> rename
         <Sep />
         <Key>⇧S</Key> section
+        <Sep />
+        <Key>⇧X</Key> drop section
         <Sep />
         <Key>q</Key> archive
         <Sep />
