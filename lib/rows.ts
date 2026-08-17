@@ -241,7 +241,11 @@ function groupKeyOf(thread: CascadeColumn, mode: GroupingMode): string {
  * plugin exposes no attach method over its rpc contract, so a task row could
  * not accept a drop even if the layout wanted it to.)
  *
- * Empty groups are dropped — a section with no threads has no strip to draw.
+ * An empty section still gets a row. It is the only writable grouping, so its
+ * row is the drop target that a freshly created section needs before anything
+ * lives in it — drop the row and there is nowhere to drag, `m`, or `⇧jk` a
+ * thread to. Every other grouping stays dropped when empty: those rows are
+ * read-only, so an empty one is a rail slot you can never fill.
  */
 export function buildRows(
   index: CascadeIndex,
@@ -277,8 +281,8 @@ export function buildRows(
   }
 
   for (const entry of entriesFor(index, mode)) {
-    const columns = byKey.get(entry.id);
-    if (!columns?.length) continue;
+    const columns = byKey.get(entry.id) ?? [];
+    if (!columns.length && mode !== "sections") continue;
     const key = rowKeyFor(mode, entry.id);
     rows.push({
       key,

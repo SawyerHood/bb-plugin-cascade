@@ -346,6 +346,18 @@ function CascadePanel({ subPath }: { subPath: string }) {
     if (column >= 0) setFocus(rows[target]!, column);
   }, [rows, subPath, setFocus]);
 
+  // A row a mutation asked to land on. It cannot be an index, because the row
+  // does not exist yet when the request is made — it arrives with the next
+  // index refetch, at whatever position the section order puts it.
+  const pendingRowKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pendingRowKey.current) return;
+    const target = rows.findIndex((row) => row.key === pendingRowKey.current);
+    if (target < 0) return;
+    pendingRowKey.current = null;
+    setRowIdx(target);
+  }, [rows]);
+
   // ------------------------------------------------------------ mutations
   /** Apply a row's drop rule to a thread. Returns false when it is read-only. */
   const applyDrop = useCallback(
@@ -627,15 +639,30 @@ function CascadePanel({ subPath }: { subPath: string }) {
     [currentRow, rpc, refresh],
   );
 
+  /**
+   * Create a section and land on it.
+   *
+   * The default name has to dodge the names already taken: section names are
+   * unique server-side, so a fixed "New section" fails with HTTP 409 the
+   * second time you press this. The server still recovers from a lost race by
+   * returning the existing section, so either way this resolves to a real row.
+   */
   const newSection = useCallback(async () => {
+    const taken = new Set((index?.sections ?? []).map((section) => section.name));
+    let name = "New section";
+    for (let n = 2; taken.has(name); n += 1) name = `New section ${n}`;
     try {
-      await rpc.call("createSection", { name: "New section" });
+      const section = await rpc.call("createSection", { name });
+      // The row only exists once the index refetch lands, so ask for it by key
+      // and let the effect above jump once it appears. Only a sections grouping
+      // draws section rows, so in any other one there is nothing to land on.
+      if (mode === "sections") pendingRowKey.current = section.id;
       await refresh();
-      toast.success("Section created — move a thread into it to see its row");
+      toast.success(`Created “${section.name}” — press c to rename it`);
     } catch {
       toast.error("Could not create section");
     }
-  }, [rpc, refresh]);
+  }, [index, mode, rpc, refresh]);
 
   /** Archive the focused thread, with an undo toast — never a bare destroy. */
   const closeColumn = useCallback(async () => {
