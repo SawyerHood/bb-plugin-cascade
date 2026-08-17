@@ -96,4 +96,4 @@ scrollable, so they always move rows.
 `h` `l` columns · `j` `k` rows · `H` `L` reorder · `J` `K` move to row ·
 `i` / `↵` composer · `esc` back · `r` width · `o` overview · `n` new thread ·
 `N` child thread · `m` move to… · `g` group by · `c` rename · `S` section ·
-`q` archive
+`X` drop section · `q` archive
