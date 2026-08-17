@@ -21,6 +21,24 @@ export function isRenameable(row: RenameTarget | null | undefined): boolean {
   return row?.kind === "sections";
 }
 
+/**
+ * Why the focused row refuses to be renamed, in words for the user.
+ *
+ * Outside a sections grouping the whole mode refuses, and naming the mode is
+ * the clearest thing to say. Inside one, sections are exactly what *can* be
+ * renamed, and the rows that refuse are the derived two, so naming the mode
+ * there produces "sections aren't renameable" and denies the very thing the
+ * key does. Name the row instead.
+ */
+export function renameBlockedMessage(
+  row: RenameTarget | null | undefined,
+  mode: string,
+  modeLabel: string,
+): string {
+  if (mode !== "sections") return `${modeLabel} aren't renameable`;
+  return row ? `“${row.name}” is not a section` : "There is no row to rename";
+}
+
 export type RenamePlan =
   | { kind: "rename"; id: string; name: string }
   | { kind: "skip"; reason: "not-a-section" | "blank" | "unchanged" };

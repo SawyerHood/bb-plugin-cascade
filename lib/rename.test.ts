@@ -6,7 +6,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isRenameable, planRename } from "./rename.ts";
+import {
+  isRenameable,
+  planRename,
+  renameBlockedMessage,
+} from "./rename.ts";
 import { buildRows, type CascadeColumn, type CascadeIndex } from "./rows.ts";
 
 function thread(overrides: Partial<CascadeColumn> = {}): CascadeColumn {
@@ -131,6 +135,42 @@ test("the derived rows of a sections grouping are not renameable either", () => 
       kind: "skip",
       reason: "not-a-section",
     });
+  }
+});
+
+// The bug that made the feature look dead: pressing c on Pinned reported
+// "sections aren't renameable" while grouped by sections, so the panel denied
+// the one thing the key exists to do.
+test("a derived row in sections grouping never blames sections", () => {
+  const derived = buildRows(index, "sections").filter(
+    (row) => row.kind !== "sections",
+  );
+  assert.ok(derived.length, "expected Pinned and Unsectioned");
+  for (const row of derived) {
+    const message = renameBlockedMessage(row, "sections", "sections");
+    assert.ok(
+      !/sections aren't renameable/.test(message),
+      `“${row.name}” still reports: ${message}`,
+    );
+    assert.ok(
+      message.includes(row.name),
+      `expected the message to name the row, got: ${message}`,
+    );
+  }
+});
+
+test("the other groupings still name the mode", () => {
+  for (const [mode, label] of [
+    ["projects", "projects"],
+    ["hosts", "machines"],
+    ["taskProjects", "task projects"],
+    ["tasks", "tasks"],
+  ] as const) {
+    const row = buildRows(index, mode)[0]!;
+    assert.equal(
+      renameBlockedMessage(row, mode, label),
+      `${label} aren't renameable`,
+    );
   }
 });
 

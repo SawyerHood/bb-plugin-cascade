@@ -35,7 +35,7 @@ import {
   type CascadeRow,
   type GroupingMode,
 } from "./lib/rows";
-import { isRenameable, planRename } from "./lib/rename";
+import { isRenameable, planRename, renameBlockedMessage } from "./lib/rename";
 import { cn } from "@/lib/utils";
 
 // niri's `preset-column-widths`, as a fraction of the viewport.
@@ -642,7 +642,7 @@ function CascadePanel({ subPath }: { subPath: string }) {
   const startRename = useCallback(() => {
     if (!currentRow) return;
     if (!isRenameable(currentRow)) {
-      toast.error(`${MODE_LABEL[mode]} aren't renameable`);
+      toast.error(renameBlockedMessage(currentRow, mode, MODE_LABEL[mode]));
       return;
     }
     setRenamingKey(currentRow.key);
@@ -1711,9 +1711,20 @@ function RowRenameInput({
     settled.current = true;
     run();
   };
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Open on the whole name, selected, the way every other rename box does —
+  // Finder, VS Code, a browser's own bookmark editor. `autoFocus` alone leaves
+  // a bare caret at the end, so typing the new name appends it to the old one
+  // and "New section" becomes "New sectionrenamed".
+  useEffect(() => {
+    const node = inputRef.current;
+    if (!node) return;
+    node.focus();
+    node.select();
+  }, []);
   return (
     <input
-      autoFocus
+      ref={inputRef}
       data-row-rename
       defaultValue={name}
       // The panel keymap is bare letters, so nothing typed in here may reach
