@@ -1,3 +1,5 @@
+> **Moved:** this plugin now lives in [sawyer-plugins](https://github.com/SawyerHood/sawyer-plugins/tree/main/plugins/cascade). This repository is archived and no longer receives updates.
+
 # bb-plugin-cascade
 
 A scrollable-tiling thread layout, [niri](https://github.com/YaLTeR/niri)-style:
